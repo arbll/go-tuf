@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 
+	"github.com/secure-systems-lab/go-securesystemslib/cjson"
+
 	"github.com/theupdateframework/go-tuf/data"
 )
 
@@ -88,7 +90,7 @@ func (e *ed25519Signer) SignMessage(message []byte) ([]byte, error) {
 }
 
 func (e *ed25519Signer) MarshalPrivateKey() (*data.PrivateKey, error) {
-	valueBytes, err := json.Marshal(ed25519PrivateKeyValue{
+	valueBytes, err := cjson.EncodeCanonical(ed25519PrivateKeyValue{
 		Public:  data.HexBytes([]byte(e.PrivateKey.Public().(ed25519.PublicKey))),
 		Private: data.HexBytes(e.PrivateKey),
 	})
@@ -118,7 +120,7 @@ func (e *ed25519Signer) UnmarshalPrivateKey(key *data.PrivateKey) error {
 }
 
 func (e *ed25519Signer) PublicData() *data.PublicKey {
-	keyValBytes, _ := json.Marshal(ed25519Verifier{PublicKey: []byte(e.PrivateKey.Public().(ed25519.PublicKey))})
+	keyValBytes, _ := cjson.EncodeCanonical(ed25519Verifier{PublicKey: []byte(e.PrivateKey.Public().(ed25519.PublicKey))})
 	return &data.PublicKey{
 		Type:       e.keyType,
 		Scheme:     e.keyScheme,
