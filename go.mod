@@ -1,4 +1,4 @@
-module github.com/theupdateframework/go-tuf
+module github.com/arbll/go-tuf
 
 go 1.16
 
