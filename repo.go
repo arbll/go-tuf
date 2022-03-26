@@ -34,44 +34,6 @@ var topLevelMetadata = []string{
 // names and generate target file metadata with additional custom metadata.
 type TargetsWalkFunc func(path string, target io.Reader) error
 
-type LocalStore interface {
-	// GetMeta returns a map from metadata file names (e.g. root.json) to their raw JSON payload or an error.
-	GetMeta() (map[string]json.RawMessage, error)
-
-	// SetMeta is used to update a metadata file name with a JSON payload.
-	SetMeta(string, json.RawMessage) error
-
-	// WalkStagedTargets calls targetsFn for each staged target file in paths.
-	//
-	// If paths is empty, all staged target files will be walked.
-	WalkStagedTargets(paths []string, targetsFn TargetsWalkFunc) error
-
-	// FileIsStaged determines if a metadata file is currently staged, to avoid incrementing
-	// version numbers repeatedly while staged.
-	FileIsStaged(filename string) bool
-
-	// Commit is used to publish staged files to the repository
-	//
-	// This will also reset the staged meta to signal incrementing version numbers.
-	// TUF 1.0 requires that the root metadata version numbers in the repository does not
-	// gaps. To avoid this, we will only increment the number once until we commit.
-	Commit(bool, map[string]int, map[string]data.Hashes) error
-
-	// GetSigners return a list of signers for a role.
-	GetSigners(string) ([]keys.Signer, error)
-
-	// SaveSigner adds a signer to a role.
-	SaveSigner(string, keys.Signer) error
-
-	// Clean is used to remove all staged metadata files.
-	Clean() error
-}
-
-type PassphraseChanger interface {
-	// ChangePassphrase changes the passphrase for a role keys file.
-	ChangePassphrase(string) error
-}
-
 type Repo struct {
 	local          LocalStore
 	hashAlgorithms []string
@@ -112,11 +74,14 @@ func (r *Repo) Init(consistentSnapshot bool) error {
 	root.ConsistentSnapshot = consistentSnapshot
 	// Set root version to 1 for a new root.
 	root.Version = 1
-	err = r.setTopLevelMeta("root.json", root)
-	if err == nil {
-		fmt.Println("Repository initialized")
+	if err = r.setTopLevelMeta("root.json", root); err != nil {
+		return err
 	}
-	return err
+	if err = r.writeTargetWithExpires(t, data.DefaultExpires("targets")); err != nil {
+		return err
+	}
+	fmt.Println("Repository initialized")
+	return nil
 }
 
 func (r *Repo) topLevelKeysDB() (*verify.DB, error) {
@@ -187,13 +152,18 @@ func (r *Repo) RootVersion() (int, error) {
 }
 
 func (r *Repo) GetThreshold(keyRole string) (int, error) {
+	if !roles.IsTopLevelRole(keyRole) {
+		// Delegations are not currently supported, so return an error if this is not a
+		// top-level metadata file.
+		return -1, ErrInvalidRole{keyRole, "only thresholds for top-level roles supported"}
+	}
 	root, err := r.root()
 	if err != nil {
 		return -1, err
 	}
 	role, ok := root.Roles[keyRole]
 	if !ok {
-		return -1, ErrInvalidRole{keyRole}
+		return -1, ErrInvalidRole{keyRole, "role missing from root metadata"}
 	}
 
 	return role.Threshold, nil
@@ -203,7 +173,7 @@ func (r *Repo) SetThreshold(keyRole string, t int) error {
 	if !roles.IsTopLevelRole(keyRole) {
 		// Delegations are not currently supported, so return an error if this is not a
 		// top-level metadata file.
-		return ErrInvalidRole{keyRole}
+		return ErrInvalidRole{keyRole, "only thresholds for top-level roles supported"}
 	}
 	root, err := r.root()
 	if err != nil {
@@ -211,7 +181,7 @@ func (r *Repo) SetThreshold(keyRole string, t int) error {
 	}
 	role, ok := root.Roles[keyRole]
 	if !ok {
-		return ErrInvalidRole{keyRole}
+		return ErrInvalidRole{keyRole, "role missing from root metadata"}
 	}
 	if role.Threshold == t {
 		// Change was a no-op.
@@ -318,7 +288,7 @@ func (r *Repo) timestamp() (*data.Timestamp, error) {
 
 func (r *Repo) ChangePassphrase(keyRole string) error {
 	if !roles.IsTopLevelRole(keyRole) {
-		return ErrInvalidRole{keyRole}
+		return ErrInvalidRole{keyRole, "only support passphrases for top-level roles"}
 	}
 
 	if p, ok := r.local.(PassphraseChanger); ok {
@@ -351,7 +321,7 @@ func (r *Repo) AddPrivateKey(role string, signer keys.Signer) error {
 
 func (r *Repo) AddPrivateKeyWithExpires(keyRole string, signer keys.Signer, expires time.Time) error {
 	if !roles.IsTopLevelRole(keyRole) {
-		return ErrInvalidRole{keyRole}
+		return ErrInvalidRole{keyRole, "only support adding keys for top-level roles"}
 	}
 
 	if !validExpires(expires) {
@@ -449,7 +419,7 @@ func (r *Repo) RevokeKey(role, id string) error {
 
 func (r *Repo) RevokeKeyWithExpires(keyRole, id string, expires time.Time) error {
 	if !roles.IsTopLevelRole(keyRole) {
-		return ErrInvalidRole{keyRole}
+		return ErrInvalidRole{keyRole, "only revocations for top-level roles supported"}
 	}
 
 	if !validExpires(expires) {
@@ -552,7 +522,7 @@ func (r *Repo) setTopLevelMeta(roleFilename string, meta interface{}) error {
 func (r *Repo) Sign(roleFilename string) error {
 	role := strings.TrimSuffix(roleFilename, ".json")
 	if !roles.IsTopLevelRole(role) {
-		return ErrInvalidRole{role}
+		return ErrInvalidRole{role, "only signing top-level metadata supported"}
 	}
 
 	s, err := r.SignedMeta(roleFilename)
@@ -588,7 +558,7 @@ func (r *Repo) Sign(roleFilename string) error {
 func (r *Repo) AddOrUpdateSignature(roleFilename string, signature data.Signature) error {
 	role := strings.TrimSuffix(roleFilename, ".json")
 	if !roles.IsTopLevelRole(role) {
-		return ErrInvalidRole{role}
+		return ErrInvalidRole{role, "only signing top-level metadata supported"}
 	}
 
 	// Check key ID is in valid for the role.
@@ -598,7 +568,7 @@ func (r *Repo) AddOrUpdateSignature(roleFilename string, signature data.Signatur
 	}
 	roleData := db.GetRole(role)
 	if roleData == nil {
-		return ErrInvalidRole{role}
+		return ErrInvalidRole{role, "role missing from top-level keys"}
 	}
 	if !roleData.ValidKey(signature.KeyID) {
 		return verify.ErrInvalidKey
@@ -776,7 +746,7 @@ func (r *Repo) writeTargetWithExpires(t *data.Targets, expires time.Time) error 
 	}
 
 	err := r.setTopLevelMeta("targets.json", t)
-	if err == nil {
+	if err == nil && len(t.Targets) > 0 {
 		fmt.Println("Added/staged targets:")
 		for k := range t.Targets {
 			fmt.Println("*", k)

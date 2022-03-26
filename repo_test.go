@@ -184,7 +184,7 @@ func (rs *RepoSuite) TestGenKey(c *C) {
 
 	// generate a key for an unknown role
 	_, err = r.GenKey("foo")
-	c.Assert(err, Equals, ErrInvalidRole{"foo"})
+	c.Assert(err, Equals, ErrInvalidRole{"foo", "only support adding keys for top-level roles"})
 
 	// generate a root key
 	ids := genKey(c, r, "root")
@@ -346,7 +346,7 @@ func (rs *RepoSuite) TestAddPrivateKey(c *C) {
 	signer, err := keys.GenerateEd25519Key()
 	c.Assert(err, IsNil)
 	err = r.AddPrivateKey("foo", signer)
-	c.Assert(err, Equals, ErrInvalidRole{"foo"})
+	c.Assert(err, Equals, ErrInvalidRole{"foo", "only support adding keys for top-level roles"})
 
 	// add a root key
 	ids := addPrivateKey(c, r, "root", signer)
@@ -511,7 +511,7 @@ func (rs *RepoSuite) TestRevokeKey(c *C) {
 	c.Assert(err, IsNil)
 
 	// revoking a key for an unknown role returns ErrInvalidRole
-	c.Assert(r.RevokeKey("foo", ""), DeepEquals, ErrInvalidRole{"foo"})
+	c.Assert(r.RevokeKey("foo", ""), DeepEquals, ErrInvalidRole{"foo", "only revocations for top-level roles supported"})
 
 	// revoking a key which doesn't exist returns ErrKeyNotFound
 	c.Assert(r.RevokeKey("root", "nonexistent"), DeepEquals, ErrKeyNotFound{"root", "nonexistent"})
@@ -632,6 +632,8 @@ func (rs *RepoSuite) TestSign(c *C) {
 	r, err := NewRepo(local)
 	c.Assert(err, IsNil)
 
+	c.Assert(r.Sign("foo.json"), Equals, ErrInvalidRole{"foo", "only signing top-level metadata supported"})
+
 	// signing with no keys returns ErrInsufficientKeys
 	c.Assert(r.Sign("root.json"), Equals, ErrInsufficientKeys{"root.json"})
 
@@ -676,6 +678,9 @@ func (rs *RepoSuite) TestSign(c *C) {
 	c.Assert(local.SaveSigner("root", newKey), IsNil)
 	c.Assert(r.Sign("root.json"), IsNil)
 	checkSigIDs(append(signer.PublicData().IDs(), newKey.PublicData().IDs()...)...)
+
+	// attempt to sign missing metadata
+	c.Assert(r.Sign("targets.json"), Equals, ErrMissingMetadata{"targets.json"})
 }
 
 func (rs *RepoSuite) TestCommit(c *C) {
@@ -687,13 +692,15 @@ func (rs *RepoSuite) TestCommit(c *C) {
 	// commit without root.json
 	c.Assert(r.Commit(), DeepEquals, ErrMissingMetadata{"root.json"})
 
-	// commit without targets.json
+	// Init should create targets.json, but not signed yet
+	r.Init(false)
+	c.Assert(r.Commit(), DeepEquals, ErrMissingMetadata{"snapshot.json"})
+
 	genKey(c, r, "root")
-	c.Assert(r.Commit(), DeepEquals, ErrMissingMetadata{"targets.json"})
 
 	// commit without snapshot.json
 	genKey(c, r, "targets")
-	c.Assert(r.AddTarget("foo.txt", nil), IsNil)
+	c.Assert(r.Sign("targets.json"), IsNil)
 	c.Assert(r.Commit(), DeepEquals, ErrMissingMetadata{"snapshot.json"})
 
 	// commit without timestamp.json
@@ -714,12 +721,12 @@ func (rs *RepoSuite) TestCommit(c *C) {
 	// commit with an invalid root hash in snapshot.json due to new key creation
 	genKey(c, r, "targets")
 	c.Assert(r.Sign("targets.json"), IsNil)
-	c.Assert(r.Commit(), DeepEquals, errors.New("tuf: invalid targets.json in snapshot.json: wrong length, expected 511 got 725"))
+	c.Assert(r.Commit(), DeepEquals, errors.New("tuf: invalid targets.json in snapshot.json: wrong length, expected 338 got 552"))
 
 	// commit with an invalid targets hash in snapshot.json
 	c.Assert(r.Snapshot(), IsNil)
 	c.Assert(r.AddTarget("bar.txt", nil), IsNil)
-	c.Assert(r.Commit(), DeepEquals, errors.New("tuf: invalid targets.json in snapshot.json: wrong length, expected 725 got 899"))
+	c.Assert(r.Commit(), DeepEquals, errors.New("tuf: invalid targets.json in snapshot.json: wrong length, expected 552 got 725"))
 
 	// commit with an invalid timestamp
 	c.Assert(r.Snapshot(), IsNil)
@@ -1384,6 +1391,12 @@ func (rs *RepoSuite) TestKeyPersistence(c *C) {
 	tmp = newTmpDir(c)
 	store = FileSystemStore(tmp.path, testPassphraseFunc)
 
+	// 1.5. Changing passphrase only works for top-level roles.
+	r, err := NewRepo(store)
+	c.Assert(err, IsNil)
+
+	c.Assert(r.ChangePassphrase("foo"), DeepEquals, ErrInvalidRole{"foo", "only support passphrases for top-level roles"})
+
 	// 2. Test changing the passphrase when the keys file does not exist - should FAIL
 	c.Assert(store.(PassphraseChanger).ChangePassphrase("root"), NotNil)
 
@@ -1596,6 +1609,11 @@ func (rs *RepoSuite) TestThreshold(c *C) {
 	r, err := NewRepo(local)
 	c.Assert(err, IsNil)
 
+	_, err = r.GetThreshold("root")
+	c.Assert(err, DeepEquals, ErrInvalidRole{"root", "role missing from root metadata"})
+	err = r.SetThreshold("root", 2)
+	c.Assert(err, DeepEquals, ErrInvalidRole{"root", "role missing from root metadata"})
+
 	// Add one key to each role
 	genKey(c, r, "root")
 	genKey(c, r, "targets")
@@ -1604,6 +1622,11 @@ func (rs *RepoSuite) TestThreshold(c *C) {
 	t, err := r.GetThreshold("root")
 	c.Assert(err, IsNil)
 	c.Assert(t, Equals, 1)
+
+	_, err = r.GetThreshold("foo")
+	c.Assert(err, DeepEquals, ErrInvalidRole{"foo", "only thresholds for top-level roles supported"})
+	err = r.SetThreshold("foo", 2)
+	c.Assert(err, DeepEquals, ErrInvalidRole{"foo", "only thresholds for top-level roles supported"})
 
 	// commit the metadata to the store.
 	c.Assert(r.AddTargets([]string{}, nil), IsNil)
@@ -1725,6 +1748,10 @@ func (rs *RepoSuite) TestBadAddOrUpdateSignatures(c *C) {
 	// don't use consistent snapshots to make the checks simpler
 	c.Assert(r.Init(false), IsNil)
 
+	c.Assert(r.AddOrUpdateSignature("targets.json", data.Signature{
+		KeyID:     "foo",
+		Signature: nil}), Equals, ErrInvalidRole{"targets", "role missing from top-level keys"})
+
 	// generate root key offline and add as a verification key
 	rootKey, err := keys.GenerateEd25519Key()
 	c.Assert(err, IsNil)
@@ -1747,7 +1774,7 @@ func (rs *RepoSuite) TestBadAddOrUpdateSignatures(c *C) {
 	for _, id := range rootKey.PublicData().IDs() {
 		c.Assert(r.AddOrUpdateSignature("invalid_root.json", data.Signature{
 			KeyID:     id,
-			Signature: rootSig}), Equals, ErrInvalidRole{"invalid_root"})
+			Signature: rootSig}), Equals, ErrInvalidRole{"invalid_root", "only signing top-level metadata supported"})
 	}
 
 	// add a root signature with an key ID that is for the targets role

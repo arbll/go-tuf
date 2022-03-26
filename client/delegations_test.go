@@ -1,6 +1,7 @@
 package client
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,7 +27,13 @@ func TestGetTargetMeta(t *testing.T) {
 
 	f, err := c.getTargetFileMeta("f.txt")
 	assert.Nil(t, err)
-	assert.Equal(t, int64(15), f.Length)
+	hash := sha256.Sum256([]byte("Contents: f.txt"))
+	assert.Equal(t, data.HexBytes(hash[:]), f.Hashes["sha256"])
+
+	f, err = c.getTargetFileMeta("targets.txt")
+	assert.Nil(t, err)
+	hash = sha256.Sum256([]byte("Contents: targets.txt"))
+	assert.Equal(t, data.HexBytes(hash[:]), f.Hashes["sha256"])
 }
 
 func TestMaxDelegations(t *testing.T) {
@@ -268,19 +275,7 @@ func initTestDelegationClient(t *testing.T, dirPrefix string) (*Client, func() e
 	c := NewClient(MemoryLocalStore(), remote)
 	rawFile, err := ioutil.ReadFile(initialStateDir + "/" + "root.json")
 	assert.Nil(t, err)
-	s := &data.Signed{}
-	root := &data.Root{}
-	assert.Nil(t, json.Unmarshal(rawFile, s))
-	assert.Nil(t, json.Unmarshal(s.Signed, root))
-	var keys []*data.PublicKey
-	for _, sig := range s.Signatures {
-		k, ok := root.Keys[sig.KeyID]
-		if ok {
-			keys = append(keys, k)
-		}
-	}
-
-	assert.Nil(t, c.Init(keys, 1))
+	assert.Nil(t, c.InitLocal(rawFile))
 	files, err := ioutil.ReadDir(initialStateDir)
 	assert.Nil(t, err)
 
